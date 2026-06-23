@@ -1,0 +1,34 @@
+# Dados e artefatos pesados/locais
+data/
+logs/
+test_run/
+*.tif
+*.tif.aux.xml
+*.vrt
+*.npz
+*.pkl
+*.qgz
+
+# Vetores e amostras locais
+01_AOI/
+02_SEGEMAR/
+03_AMOSTRAS/
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.qmd
+*.gpkg
+
+# Python/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Ambiente
+.env
+.venv/
+venv/
+*.log

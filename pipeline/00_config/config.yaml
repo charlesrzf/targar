@@ -1,0 +1,213 @@
+project:
+  name: "cu-porfiro-targeting-argentina"
+  version: "2.0.0"
+  crs: "EPSG:32719"          # UTM Zone 19S
+  resolution: 30             # metros — nativo Prithvi/HLS; alvos de alta resolução
+  log_level: "INFO"
+
+paths:
+  root: "D:/argentina"
+  pipeline: "D:/argentina/pipeline"
+  data: "D:/argentina/data"
+  aoi_shp: "D:/argentina/01_AOI/AOI.shp"
+  aoi_tiles: "D:/argentina/01_AOI/AOI_Segmentos.shp"   # 3 segmentos cobrindo AOI completa
+  segemar_dir: "D:/argentina/02_SEGEMAR"
+  amostras_gpkg: "D:/argentina/03_AMOSTRAS/Dados Argentina.gpkg"
+  downloads: "D:/argentina/data/04_MPC_DOWNLOADS"
+  rasters: "D:/argentina/data/05_RASTERS"
+  embeddings: "D:/argentina/data/06_EMBEDDINGS"
+  models: "D:/argentina/data/07_MODELS"
+  output: "D:/argentina/data/08_OUTPUT"
+  logs: "D:/argentina/logs"
+
+# Área de interesse — AOI.shp é a máscara mestre
+aoi:
+  bbox_utm19s: [313300, 5748700, 548300, 6536700]  # minx miny maxx maxy — AOI completa
+  bbox_wgs84: [-71.5, -40.5, -68.0, -31.5]         # WGS84 aproximado
+  # Segmentos definem os tiles de download/processamento
+  tiles:
+    - id: "seg_norte"    # Y 6316451–6536696  (~-34.0 a -31.5 lat)
+      priority: 1
+    - id: "seg_centro"   # Y 6053924–6316451  (~-37.0 a -34.0 lat)
+      priority: 1
+    - id: "seg_sul"      # Y 5748700–6053924  (~-40.5 a -37.0 lat)
+      priority: 2
+
+# Sentinel-2
+satellite:
+  s2:
+    collection: "sentinel-2-l2a"
+    bands: ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12"]
+    date_start: "2019-01-01"
+    date_end: "2025-12-31"
+    cloud_cover_max: 25
+    composite_method: "median"
+    months_dry: [3, 4, 5, 6, 7, 8, 9, 10]
+    max_scenes: 30
+
+  dem:
+    collection: "cop-dem-glo-30"
+    resolution: 30
+
+# Índices espectrais para pórfiro Cu
+spectral_indices:
+  clay_index:   {b1: "B11", b2: "B12", formula: "B11/B12"}    # argilo-minerais
+  ferric_iron:  {b1: "B04", b2: "B03", formula: "B04/B03"}    # goethita/limonita
+  iron_oxide:   {b1: "B04", b2: "B02", formula: "B04/B02"}    # óxidos de ferro
+  ndvi:         {b1: "B08", b2: "B04", formula: "(B08-B04)/(B08+B04)"}
+  ndwi:         {b1: "B03", b2: "B08", formula: "(B03-B08)/(B03+B08)"}
+  swir_ratio:   {b1: "B11", b2: "B08", formula: "B11/B08"}    # exposição de rocha
+
+# SEGEMAR — shapefiles recortados para AOI em EPSG:32719 (UTM 19S)
+segemar_layers:
+  - name: "geotectonico_clasif"
+    file: "Recorte/geotectonico.shp"
+    field: "clasif_tec"     # classificação tectônica (arco magmático, etc.)
+    type: "categorical"
+  - name: "geotectonico_orogenia"
+    file: "Recorte/geotectonico.shp"
+    field: "orogenia"
+    type: "categorical"
+  - name: "falhas_densidade"
+    file: "Recorte/Falhas.shp"
+    type: "density"
+    density_radius_m: 15000
+  - name: "geologia_ambiente"
+    file: "Recorte/unidades_geologia.shp"
+    field: "ambiente"       # ambiente geológico (intrusivo, vulcânico, etc.)
+    type: "categorical"
+  - name: "geologia_litologia"
+    file: "Recorte/unidades_geologia.shp"
+    field: "litologia"
+    type: "categorical"
+
+# Depósitos — foco exclusivo Cu pórfiro
+deposits:
+  use_occurrences: false
+  use_label_sets: true
+  label_sets:
+    nucleo:
+      file: "nucleo.shp"
+      label: 1
+      weight: 1.0
+    interpretado:
+      file: "interpret.shp"
+      label: 1
+      weight: 0.45
+    negativo:
+      file: "negativo.shp"
+      label: 0
+      weight: 1.0
+  ocorrencias_layer: "Ocorrencias_de_Cobre_Aoi_arg_if_v2"
+  tipo_field: "cod_modelo"
+  tipos:
+    porfiro: ["4b", "4c"]   # Cu-Mo pórfiro (SEGEMAR)
+  buffer_m:
+    porfiro: 4000           # halo alteração hidrotermal ~4km
+  # Para alvos discretos, não basta o patch grande "encostar" na zona positiva.
+  # center = positivo só quando o centro do patch cai na zona positiva.
+  # overlap = positivo quando a fração de área do patch na zona positiva >= min_overlap.
+  positive_label_mode: "center"
+  positive_min_overlap: 0.10
+
+  # Shapefiles de campo exportados (EPSG:32719 — sem reprojeção)
+  amostras_dir: "D:/argentina/03_AMOSTRAS"
+  amostras_shapefiles:
+    - "amo01.shp"
+    - "amo02.shp"
+    - "amo03.shp"
+    - "amo04.shp"
+    - "amo05.shp"
+    - "amo06.shp"
+    - "amo07.shp"
+    - "amo08.shp"
+    - "amo09.shp"
+    - "amo010.shp"
+    - "amo011.shp"
+
+  negative_sampling:
+    ratio: 5
+    min_dist_from_deposit_m: 10000
+
+# Modelo Prithvi
+prithvi:
+  model_id: "ibm-nasa-geospatial/Prithvi-EO-2.0-300M"
+  patch_size: 224
+  patch_size_m: 6720        # 224 * 30m (extração sempre em resolução nativa S2)
+  stride: 32                # passo entre patches (px) — 32*30m≈1km, centros densos
+  embedding_dim: 768
+  batch_size: 128           # RTX 4090 25.8GB — 4× mais rápido que batch=32
+  num_frames: 1
+  bands_input: 6            # B02, B03, B04, B8A, B11, B12
+  fp16: true
+  device: "cuda"
+
+# Treino LightGBM
+training:
+  priority_model: "porfiro"
+  use_segemar_features: false
+  use_geochem_features: false
+  use_terrain_features: true
+  use_s2_index_features: true
+  tabular_patch_stats: ["mean", "std", "max"]
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 42
+  use_smote: false          # pesos de amostra substituem SMOTE quando label_sets está ativo
+  smote_k_neighbors: 5
+  n_trials_optuna: 50
+  lgbm_params_base:
+    objective: "binary"
+    metric: "auc"
+    n_estimators: 1000
+    learning_rate: 0.05
+    num_leaves: 63
+    min_child_samples: 10
+    subsample: 0.8
+    colsample_bytree: 0.8
+    class_weight: "balanced"
+    device: "cpu"
+    verbose: -1
+
+# Download Planetary Computer
+mpc:
+  max_workers: 4
+  chunk_size_deg: 1.0
+  retry_attempts: 3
+  timeout_s: 300
+  token: ""
+
+# Output
+output:
+  formats: ["geotiff", "shapefile"]
+  top_targets_n: 50
+  colormap: "RdYlGn"
+  nodata: -9999
+  target_min_prob: 0.75
+  target_percentile: 99.7
+  target_min_area_km2: 0.2
+  target_max_area_km2: 5
+  # Superfície de favorabilidade Prithvi:
+  # gaussian = janela móvel local sobre centros de patch, evita quadrículas sem
+  # voltar à interpolação regional que criava alvos gigantes.
+  surface_method: "gaussian"
+  surface_gaussian_sigma_stride: 1.0
+
+# Pipeline per-pixel (benchmark RF/GB — independente do Prithvi)
+pixel_model:
+  n_pos: 8000              # máx. pixels positivos amostrados da zona positiva
+  neg_ratio: 3            # negativos = neg_ratio × positivos
+  cv_folds: 5             # validação cruzada estratificada
+  spatial_block_m: 30000  # blocos para validação espacial
+  block_rows: 128         # altura do bloco na inferência full-AOI (controla RAM)
+  predict_batch: 200000   # linhas por sub-lote no predict (limita pico de RAM)
+  n_jobs: 4               # paralelismo limitado (evita estouro de RAM)
+  random_state: 42
+  prefer_fast_model: true # usa LightGBM se AUC ficar perto do melhor
+  fast_model_auc_tolerance: 0.03
+  use_label_sets: true    # pixel v2: nucleo/interpretado/negativo explícitos
+  include_background_negatives: true
+  background_negative_weight: 0.35
+  focal_windows_px: [3, 7, 15]    # 90, 210 e 450 m em resolução de 30 m
+  focal_stats: ["mean", "std"]
+  focal_feature_prefixes: ["idx_", "dem_", "seg_falhas"]
