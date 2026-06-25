@@ -101,15 +101,15 @@ deposits:
   use_label_sets: true
   label_sets:
     nucleo:
-      file: "nucleo.shp"
+      file: "Prioridade_01.shp"
       label: 1
       weight: 1.0
     interpretado:
-      file: "interpret.shp"
+      file: "Prioridade_02.shp"
       label: 1
       weight: 0.45
     negativo:
-      file: "negativo.shp"
+      file: "negativas.shp"
       label: 0
       weight: 1.0
   ocorrencias_layer: "Ocorrencias_de_Cobre_Aoi_arg_if_v2"
@@ -125,7 +125,7 @@ deposits:
   positive_min_overlap: 0.10
 
   # Shapefiles de campo exportados (EPSG:32719 — sem reprojeção)
-  amostras_dir: "D:/argentina/03_AMOSTRAS"
+  amostras_dir: "D:/argentina/03_AMOSTRAS/Prioridades"
   amostras_shapefiles:
     - "amo01.shp"
     - "amo02.shp"
