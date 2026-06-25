@@ -221,7 +221,7 @@ pixel_model:
   fast_model_auc_tolerance: 0.03
   use_label_sets: true    # pixel v2: nucleo/interpretado/negativo explícitos
   point_training: true    # amostra diretamente nos polígonos, inclusive fora da AOI
-  use_segemar_features: false # SEGEMAR atual cobre só a AOI; evitar shift treino/predição
+  use_segemar_features: true
   include_background_negatives: true
   background_negative_weight: 0.35
   focal_windows_px: []    # desativado no treino fora da AOI para evitar VRT gigante

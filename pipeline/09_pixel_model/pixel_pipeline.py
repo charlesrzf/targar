@@ -135,6 +135,89 @@ def add_segemar_features(spec, layers: dict, cfg: dict):
     return out
 
 
+def _load_category_map(segemar_dir: Path, layer_name: str):
+    legend = segemar_dir / f"{layer_name}.csv"
+    if not legend.exists():
+        return {}
+    df = pd.read_csv(legend)
+    return {str(r["categoria"]).strip(): int(r["codigo"]) for _, r in df.iterrows()}
+
+
+def _sample_categorical_points(gdf, field: str, xs: np.ndarray, ys: np.ndarray, cat_map: dict):
+    import geopandas as gpd
+
+    pts = gpd.GeoDataFrame(
+        {"_idx": np.arange(len(xs))},
+        geometry=gpd.points_from_xy(xs, ys),
+        crs=gdf.crs,
+    )
+    joined = gpd.sjoin(pts, gdf[[field, "geometry"]], how="left", predicate="within")
+    vals = np.full(len(xs), -1, dtype=np.float32)
+    if joined.empty:
+        return vals
+    joined = joined.drop_duplicates("_idx", keep="first")
+    for _, row in joined.iterrows():
+        cat = str(row.get(field, "DESCONHECIDO")).strip()
+        vals[int(row["_idx"])] = float(cat_map.get(cat, -1))
+    return vals
+
+
+def sample_segemar_vectors_at_points(cfg, xs: np.ndarray, ys: np.ndarray):
+    """Amostra SEGEMAR diretamente dos vetores para pontos fora da AOI."""
+    sys.path.insert(0, str(Path(__file__).parent.parent / "01_segemar"))
+    from segemar_prep import load_shapefile_to_crs
+    from scipy.spatial import cKDTree
+
+    segemar_dir = Path(cfg["paths"]["segemar_dir"])
+    raster_segemar_dir = Path(cfg["paths"]["rasters"]) / "segemar"
+    crs = cfg["project"]["crs"]
+    out = {}
+
+    for layer_cfg in cfg["segemar_layers"]:
+        shp = segemar_dir / layer_cfg["file"]
+        if not shp.exists():
+            continue
+        gdf = load_shapefile_to_crs(str(shp), crs)
+        if gdf.empty:
+            continue
+
+        lname = layer_cfg["name"]
+        if layer_cfg["type"] == "categorical":
+            field = layer_cfg["field"]
+            cat_map = _load_category_map(raster_segemar_dir, lname)
+            out[f"seg_{lname}"] = _sample_categorical_points(gdf, field, xs, ys, cat_map)
+
+        elif layer_cfg["type"] == "density":
+            radius = float(layer_cfg.get("density_radius_m", 15000))
+            pts = []
+            for geom in gdf.geometry:
+                if geom is None or geom.is_empty:
+                    continue
+                length = getattr(geom, "length", 0)
+                n = max(2, int(length / (radius / 10)))
+                for i in range(n):
+                    try:
+                        p = geom.interpolate(i / (n - 1), normalized=True)
+                        pts.append((p.x, p.y))
+                    except Exception:
+                        pass
+            if not pts:
+                out[f"seg_{lname}_density"] = np.zeros(len(xs), dtype=np.float32)
+                out[f"seg_{lname}_dist"] = np.full(len(xs), np.nan, dtype=np.float32)
+                continue
+            tree = cKDTree(np.array(pts))
+            q = np.column_stack([xs, ys])
+            counts = np.array(tree.query_ball_point(q, r=radius, return_length=True), dtype=np.float32)
+            if counts.max() > 0:
+                counts = counts / counts.max()
+            dist, _ = tree.query(q, k=1)
+            out[f"seg_{lname}_density"] = counts.astype(np.float32)
+            out[f"seg_{lname}_dist"] = np.log1p(dist).astype(np.float32)
+
+    logger.info(f"SEGEMAR vetorial amostrado em pontos: {list(out)}")
+    return out
+
+
 def warped(path, grid, categorical):
     src = rasterio.open(path)
     return WarpedVRT(src, crs=grid["crs"], transform=grid["transform"],
@@ -388,10 +471,14 @@ def sample_training(cfg, grid, spec, work: Path):
 
         data = {}
         for name, path, band, _cat in spec:
+            if name.startswith("seg_"):
+                continue
             with rasterio.open(path) as v:
                 vals = np.array([x[band-1] for x in v.sample(coords)], dtype=np.float32)
             data[name] = vals
             logger.info(f"  amostrado: {name}")
+        if pm.get("use_segemar_features", True):
+            data.update(sample_segemar_vectors_at_points(cfg, xs, ys))
         df = pd.DataFrame(data)
         df["label"] = y
         df["label_source"] = source
