@@ -220,8 +220,10 @@ pixel_model:
   prefer_fast_model: true # usa LightGBM se AUC ficar perto do melhor
   fast_model_auc_tolerance: 0.03
   use_label_sets: true    # pixel v2: nucleo/interpretado/negativo explícitos
+  point_training: true    # amostra diretamente nos polígonos, inclusive fora da AOI
+  use_segemar_features: false # SEGEMAR atual cobre só a AOI; evitar shift treino/predição
   include_background_negatives: true
   background_negative_weight: 0.35
-  focal_windows_px: [3, 7, 15]    # 90, 210 e 450 m em resolução de 30 m
+  focal_windows_px: []    # desativado no treino fora da AOI para evitar VRT gigante
   focal_stats: ["mean", "std"]
   focal_feature_prefixes: ["idx_", "dem_", "seg_falhas"]

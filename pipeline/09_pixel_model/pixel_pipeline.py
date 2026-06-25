@@ -117,13 +117,22 @@ def feature_spec(layers: dict):
     for name in TERRAIN:
         if f"dem_{name}" in layers:
             spec.append((f"dem_{name}", layers[f"dem_{name}"], 1, False))
+    return spec
+
+
+def add_segemar_features(spec, layers: dict, cfg: dict):
+    """Acrescenta SEGEMAR quando o pixel model puder usar a mesma cobertura no treino e predição."""
+    if not cfg.get("pixel_model", {}).get("use_segemar_features", True):
+        logger.info("SEGEMAR desativado no pixel_model para evitar domínio treino/predição inconsistente")
+        return spec
+    out = list(spec)
     for name in SEG_CONT:
         if f"seg_{name}" in layers:
-            spec.append((f"seg_{name}", layers[f"seg_{name}"], 1, False))
+            out.append((f"seg_{name}", layers[f"seg_{name}"], 1, False))
     for name in SEG_CAT:
         if f"seg_{name}" in layers:
-            spec.append((f"seg_{name}", layers[f"seg_{name}"], 1, True))
-    return spec
+            out.append((f"seg_{name}", layers[f"seg_{name}"], 1, True))
+    return out
 
 
 def warped(path, grid, categorical):
@@ -199,6 +208,70 @@ def _sample_flat_indices(mask, n, rng):
     return rng.choice(idx, min(n, idx.size), replace=False)
 
 
+def _sample_points_in_geometry(geom, n, rng, max_attempt_factor=80):
+    from shapely.geometry import Point, Polygon, MultiPolygon
+    from shapely.prepared import prep
+
+    if n <= 0 or geom is None or geom.is_empty:
+        return np.array([]), np.array([])
+
+    if isinstance(geom, Polygon):
+        parts = [geom]
+    elif isinstance(geom, MultiPolygon):
+        parts = list(geom.geoms)
+    else:
+        try:
+            parts = [g for g in geom.geoms if isinstance(g, Polygon)]
+        except Exception:
+            parts = [geom]
+
+    parts = [p for p in parts if p is not None and not p.is_empty and p.area > 0]
+    if not parts:
+        return np.array([]), np.array([])
+
+    areas = np.array([p.area for p in parts], dtype=np.float64)
+    probs = areas / areas.sum()
+    prepared = [prep(p) for p in parts]
+    bounds = [p.bounds for p in parts]
+
+    xs, ys = [], []
+    attempts = 0
+    max_attempts = max(n * max_attempt_factor, 1000)
+    while len(xs) < n and attempts < max_attempts:
+        part_idx = int(rng.choice(len(parts), p=probs))
+        minx, miny, maxx, maxy = bounds[part_idx]
+        x = float(rng.uniform(minx, maxx))
+        y = float(rng.uniform(miny, maxy))
+        pt = Point(x, y)
+        if prepared[part_idx].contains(pt) or prepared[part_idx].covers(pt):
+            xs.append(x)
+            ys.append(y)
+        attempts += 1
+
+    if len(xs) < n:
+        logger.warning(f"Amostragem em polígono retornou {len(xs)}/{n} pontos")
+    return np.array(xs, dtype=np.float64), np.array(ys, dtype=np.float64)
+
+
+def _sample_valid_points(geom, n, rng, s2_path, grid, nodata, max_rounds=8):
+    xs_all, ys_all = [], []
+    need = n
+    with rasterio.open(s2_path) as v:
+        for _ in range(max_rounds):
+            if need <= 0:
+                break
+            xs, ys = _sample_points_in_geometry(geom, max(need * 2, 200), rng)
+            if len(xs) == 0:
+                break
+            coords = list(zip(xs, ys))
+            vals = np.array([x[0] for x in v.sample(coords)], dtype=np.float32)
+            valid = np.isfinite(vals) & (vals != nodata) & (vals != 0)
+            xs_all.extend(xs[valid].tolist())
+            ys_all.extend(ys[valid].tolist())
+            need = n - len(xs_all)
+    return np.array(xs_all[:n], dtype=np.float64), np.array(ys_all[:n], dtype=np.float64)
+
+
 def _focal_feature_names(base_name, windows, stats):
     return [f"{base_name}_w{w}_{stat}" for w in windows for stat in stats]
 
@@ -270,6 +343,73 @@ def sample_training(cfg, grid, spec, work: Path):
     if not pos_parts:
         pos_parts = [g["geometry"] for g in label_geoms.values() if int(g["label"]) == 1]
     pos_geom = _safe_union(pos_parts)
+
+    if pm.get("point_training", False):
+        logger.info("Amostragem pixel por pontos nos polígonos de treino")
+        s2_spec = next(s for s in spec if s[0] == "s2_B02")
+        n_pos_target = int(pm["n_pos"])
+        n_nuc = int(round(n_pos_target * 0.60)) if nucleo else 0
+        n_int = n_pos_target - n_nuc if interpretado else 0
+        if not nucleo:
+            n_int = n_pos_target
+        if not interpretado:
+            n_nuc = n_pos_target
+
+        nuc_x, nuc_y = _sample_valid_points(
+            nucleo["geometry"] if nucleo else None, n_nuc, rng, s2_spec[1], grid, grid["nodata"]
+        )
+        int_x, int_y = _sample_valid_points(
+            interpretado["geometry"] if interpretado else None, n_int, rng, s2_spec[1], grid, grid["nodata"]
+        )
+        n_pos = len(nuc_x) + len(int_x)
+        n_neg_target = int(pm["neg_ratio"] * n_pos)
+        neg_x, neg_y = _sample_valid_points(
+            negativo["geometry"] if negativo else None, n_neg_target, rng, s2_spec[1], grid, grid["nodata"]
+        )
+
+        xs = np.concatenate([nuc_x, int_x, neg_x])
+        ys = np.concatenate([nuc_y, int_y, neg_y])
+        y = np.concatenate([
+            np.ones(len(nuc_x), "int8"),
+            np.ones(len(int_x), "int8"),
+            np.zeros(len(neg_x), "int8"),
+        ])
+        source = ["nucleo"] * len(nuc_x) + ["interpretado"] * len(int_x) + ["negativo"] * len(neg_x)
+        weights = np.array(
+            [nucleo["weight"] if nucleo else 1.0] * len(nuc_x)
+            + [interpretado["weight"] if interpretado else 0.6] * len(int_x)
+            + [negativo["weight"] if negativo else 1.0] * len(neg_x),
+            dtype=np.float32,
+        )
+        coords = list(zip(xs, ys))
+        logger.info(
+            f"Amostras ponto: {len(nuc_x)} nucleo | {len(int_x)} interpretado | {len(neg_x)} negativo difícil"
+        )
+
+        data = {}
+        for name, path, band, _cat in spec:
+            with rasterio.open(path) as v:
+                vals = np.array([x[band-1] for x in v.sample(coords)], dtype=np.float32)
+            data[name] = vals
+            logger.info(f"  amostrado: {name}")
+        df = pd.DataFrame(data)
+        df["label"] = y
+        df["label_source"] = source
+        df["sample_weight"] = weights
+        df["x"] = xs
+        df["y"] = ys
+        block_m = pm.get("spatial_block_m", 30000)
+        df["block_id"] = (
+            np.floor(df["x"].values / block_m).astype(int).astype(str)
+            + "_"
+            + np.floor(df["y"].values / block_m).astype(int).astype(str)
+        )
+        out_csv = work / "train_dataset.csv"
+        df.to_csv(out_csv, index=False)
+        logger.success(f"Dataset salvo: {out_csv} | {df.shape}")
+        logger.info(f"Fontes: {df['label_source'].value_counts().to_dict()}")
+        return df
+
     excl_m = cfg["deposits"]["negative_sampling"]["min_dist_from_deposit_m"]
     excl_geom = pos_geom.buffer(excl_m)
 
@@ -607,7 +747,7 @@ def run(config_path=None, step="all"):
         build_vrts(cfg, vrt_dir)
 
     layers = {k: Path(v) for k, v in json.load(open(vrt_dir / "layers.json")).items()}
-    spec = feature_spec(layers)
+    spec = add_segemar_features(feature_spec(layers), layers, cfg)
     logger.info(f"Features ({len(spec)}): {[s[0] for s in spec]}")
 
     if step in ("train", "all"):
