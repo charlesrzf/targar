@@ -121,7 +121,7 @@ deposits:
   # Para alvos discretos, não basta o patch grande "encostar" na zona positiva.
   # center = positivo só quando o centro do patch cai na zona positiva.
   # overlap = positivo quando a fração de área do patch na zona positiva >= min_overlap.
-  positive_label_mode: "center"
+  positive_label_mode: "intersects"
   positive_min_overlap: 0.10
 
   # Shapefiles de campo exportados (EPSG:32719 — sem reprojeção)

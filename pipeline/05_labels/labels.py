@@ -330,7 +330,16 @@ def assign_labels(
                 if not info:
                     continue
                 zone = info["zone"]
-                is_match = zone.contains(patch_center) or zone.touches(patch_center)
+                if set_name == "negativo" or label_mode == "center":
+                    is_match = zone.contains(patch_center) or zone.touches(patch_center)
+                elif label_mode == "overlap":
+                    if zone.intersects(patch_box):
+                        matched_overlap = zone.intersection(patch_box).area / patch_box.area
+                        is_match = matched_overlap >= min_overlap
+                    else:
+                        is_match = False
+                else:
+                    is_match = zone.intersects(patch_box)
                 if is_match:
                     label = int(info["label"])
                     sample_weight = float(info["weight"])
