@@ -107,7 +107,7 @@ deposits:
     interpretado:
       file: "Prioridade_02.shp"
       label: 1
-      weight: 0.45
+      weight: 0.6
     negativo:
       file: "negativas.shp"
       label: 0
