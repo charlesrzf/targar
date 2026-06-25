@@ -605,6 +605,122 @@ class MPCDownloadAgent:
             logger.warning(f"Tile {tile.parent_tile}: {len(failed_chunks)} chunks com falha — rode novamente para reprocessar: {failed_chunks}")
         logger.success(f"Tile {tile.parent_tile} concluído: {len(bboxes) - len(failed_chunks)}/{len(bboxes)} chunks ok")
 
+    def _training_sample_union_wgs84(self):
+        """Une amostras configuradas e retorna geometria WGS84 com buffer."""
+        import pyproj as _pyproj
+        from shapely.ops import transform as _shp_transform
+        from shapely.ops import unary_union
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "05_labels"))
+        from labels import load_amostras, load_label_sets
+
+        te_cfg = self.cfg.get("training_extent", {})
+        buffer_m = float(te_cfg.get("buffer_m", 7000))
+        geoms = []
+
+        if te_cfg.get("source", "label_sets") == "label_sets" and self.cfg["deposits"].get("use_label_sets", False):
+            label_sets = load_label_sets(self.cfg)
+            for info in label_sets.values():
+                geoms.extend([g for g in info["gdf"].geometry.values if g is not None and not g.is_empty])
+        else:
+            amostras = load_amostras(self.cfg)
+            geoms.extend([g for g in amostras.geometry.values if g is not None and not g.is_empty])
+
+        if not geoms:
+            logger.warning("training_extent habilitado, mas nenhuma amostra foi carregada")
+            return None
+
+        geom_utm = unary_union(geoms).buffer(buffer_m)
+        to_wgs = _pyproj.Transformer.from_crs(self.cfg["project"]["crs"], "EPSG:4326", always_xy=True)
+        geom_wgs84 = _shp_transform(to_wgs.transform, geom_utm)
+        logger.info(
+            f"Training extent: área amostras+buffer={geom_utm.area / 1e6:.1f} km² | "
+            f"bounds WGS84={tuple(round(v, 4) for v in geom_wgs84.bounds)}"
+        )
+        return geom_wgs84
+
+    def generate_training_bboxes(self) -> List[Tuple[float, float, float, float]]:
+        """Gera chunks WGS84 que intersectam as amostras de treino."""
+        te_cfg = self.cfg.get("training_extent", {})
+        geom = self._training_sample_union_wgs84()
+        if geom is None:
+            return []
+
+        chunk_deg = float(te_cfg.get("chunk_size_deg", self.mpc_cfg.get("chunk_size_deg", 1.0)))
+        minx, miny, maxx, maxy = geom.bounds
+        minx = np.floor(minx / chunk_deg) * chunk_deg
+        miny = np.floor(miny / chunk_deg) * chunk_deg
+        maxx = np.ceil(maxx / chunk_deg) * chunk_deg
+        maxy = np.ceil(maxy / chunk_deg) * chunk_deg
+
+        bboxes = []
+        for x in np.arange(minx, maxx, chunk_deg):
+            for y in np.arange(miny, maxy, chunk_deg):
+                bbox = (
+                    round(float(x), 4),
+                    round(float(y), 4),
+                    round(float(min(x + chunk_deg, maxx)), 4),
+                    round(float(min(y + chunk_deg, maxy)), 4),
+                )
+                if box(*bbox).intersects(geom):
+                    bboxes.append(bbox)
+        logger.info(f"Training extent: {len(bboxes)} chunks de {chunk_deg}° intersectam as amostras")
+        return bboxes
+
+    def run_training_samples(self):
+        """Baixa S2/DEM para chunks estritos em torno das amostras de treino."""
+        te_cfg = self.cfg.get("training_extent", {})
+        tile_id = te_cfg.get("tile_id", "train_samples")
+        bboxes = self.generate_training_bboxes()
+        if not bboxes:
+            return
+
+        logger.info(f"{'='*50}")
+        logger.info(f"Tile de treino: {tile_id}")
+        logger.info(f"{'='*50}")
+
+        s2_cfg = self.cfg["satellite"]["s2"]
+        sar_cfg = self.cfg["satellite"].get("sar", {})
+        s2_dir = self.out_base / "s2" / tile_id
+        dem_dir = self.out_base / "dem" / tile_id
+        sar_dir = self.out_base / "sar" / tile_id
+
+        failed_chunks = []
+        for i, bbox in enumerate(tqdm(bboxes, desc=f"Downloading {tile_id}")):
+            bbox_str = f"{bbox[0]:.2f}_{bbox[1]:.2f}_{bbox[2]:.2f}_{bbox[3]:.2f}"
+            try:
+                s2_out = s2_dir / f"s2_composite_{bbox_str}.tif"
+                if not s2_out.exists():
+                    items = self.search_s2_scenes(
+                        bbox=bbox,
+                        date_start=s2_cfg["date_start"],
+                        date_end=s2_cfg["date_end"],
+                        cloud_max=s2_cfg["cloud_cover_max"],
+                        dry_months_only=True,
+                        max_scenes=s2_cfg.get("max_scenes", 20),
+                    )
+                    self.download_s2_composite(bbox, items, s2_out, bands=S2_ALL_BANDS)
+
+                dem_out = dem_dir / f"dem_{bbox_str}.tif"
+                self.download_dem(bbox, dem_out)
+
+                if sar_cfg:
+                    sar_out = sar_dir / f"sar_{bbox_str}.tif"
+                    self.download_sar(
+                        bbox,
+                        sar_out,
+                        sar_cfg.get("date_start", "2021-01-01"),
+                        sar_cfg.get("date_end", "2024-12-31"),
+                    )
+            except Exception as e:
+                logger.error(f"Chunk treino {i+1}/{len(bboxes)} falhou: {bbox_str} — {e}")
+                failed_chunks.append(bbox_str)
+                continue
+
+        if failed_chunks:
+            logger.warning(f"Training extent: {len(failed_chunks)} chunks com falha: {failed_chunks}")
+        logger.success(f"Training extent concluído: {len(bboxes) - len(failed_chunks)}/{len(bboxes)} chunks ok")
+
     def run_all(self, priority_first: bool = True):
         """Executa downloads para todos os segmentos na ordem norte→sul."""
         import pyproj as _pyproj
@@ -645,6 +761,10 @@ class MPCDownloadAgent:
                 resolution_m=self.cfg["project"]["resolution"],
             )
             self.run_tile(tile)
+
+        te_cfg = self.cfg.get("training_extent", {})
+        if te_cfg.get("enabled", False) and te_cfg.get("include_in_phase2", True):
+            self.run_training_samples()
 
         elapsed = time.time() - t0
         logger.success(f"Download completo em {elapsed/60:.0f} min")
@@ -734,6 +854,9 @@ def run(config_path: str = None, tiles: List[str] = None):
         primary = grid.load_primary_tiles()
         proj_to_wgs = _pyproj.Transformer.from_crs(cfg["project"]["crs"], "EPSG:4326", always_xy=True)
         for tile_name in tiles:
+            if tile_name == cfg.get("training_extent", {}).get("tile_id", "train_samples"):
+                agent.run_training_samples()
+                continue
             row = primary[primary["tile_name"] == tile_name]
             if len(row) == 0:
                 logger.warning(f"Segmento '{tile_name}' não encontrado")

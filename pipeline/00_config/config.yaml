@@ -33,6 +33,20 @@ aoi:
     - id: "seg_sul"      # Y 5748700–6053924  (~-40.5 a -37.0 lat)
       priority: 2
 
+# Área adicional apenas para TREINO.
+# Baixa/gera dados somente onde as amostras explícitas existirem, inclusive fora
+# da AOI de predição. A inferência final continua limitada aos prediction_tiles.
+training_extent:
+  enabled: true
+  source: "label_sets"
+  tile_id: "train_samples"
+  buffer_m: 7000          # cobre o patch Prithvi (~6.7 km) ao redor das amostras
+  chunk_size_deg: 0.5     # download mais estrito que os chunks AOI de 1 grau
+  include_in_phase2: true
+
+inference:
+  prediction_tiles: ["seg_norte", "seg_centro", "seg_sul"]
+
 # Sentinel-2
 satellite:
   s2:

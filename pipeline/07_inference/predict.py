@@ -260,8 +260,13 @@ def run(config_path: str = None, tiles: List[str] = None):
     if tiles:
         tile_names = tiles
     else:
-        tile_names = sorted([p.stem for p in embed_dir.glob("*.npz")])
-        logger.info(f"Tiles com embeddings: {tile_names}")
+        cfg_tiles = cfg.get("inference", {}).get("prediction_tiles")
+        if cfg_tiles:
+            tile_names = cfg_tiles
+            logger.info(f"Tiles de predição por config: {tile_names}")
+        else:
+            tile_names = sorted([p.stem for p in embed_dir.glob("*.npz")])
+            logger.info(f"Tiles com embeddings: {tile_names}")
     all_outputs = {}
 
     for tile_name in tile_names:

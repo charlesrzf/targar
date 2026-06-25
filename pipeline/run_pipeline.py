@@ -97,7 +97,14 @@ def run_phase(phase: int, tiles: list = None, resume: bool = False, force: bool 
             logger.info("▶ FASE 6a · Inferência")
             sys.path.insert(0, str(Path(__file__).parent / "07_inference"))
             from predict import run as run_predict
-            run_predict(config_path=str(CONFIG_PATH), tiles=tiles)
+            infer_tiles = tiles
+            if infer_tiles is None:
+                from utils.raster_utils import load_config
+                cfg = load_config(str(CONFIG_PATH))
+                infer_tiles = cfg.get("inference", {}).get("prediction_tiles")
+                if infer_tiles:
+                    logger.info(f"Inferência limitada aos tiles de predição: {infer_tiles}")
+            run_predict(config_path=str(CONFIG_PATH), tiles=infer_tiles)
 
             logger.info("▶ FASE 6b · Mosaico e Exportação")
             sys.path.insert(0, str(Path(__file__).parent / "08_output"))
